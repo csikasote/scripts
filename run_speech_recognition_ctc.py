@@ -790,7 +790,6 @@ def main():
         eval_dataset=vectorized_datasets["eval"] if training_args.do_eval else None,
         tokenizer=processor,
         preprocess_logits_for_metrics=preprocess_logits_for_metrics,
-        optimizers=optimizers,
         callbacks=[EarlyStoppingCallback(3)]
     )
 
