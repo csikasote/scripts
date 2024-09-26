@@ -46,14 +46,15 @@ from transformers import (
     EarlyStoppingCallback,
     set_seed,
 )
-from transformers.trainer_utils import get_last_checkpoint, is_main_process
+
 from transformers.trainer_pt_utils import get_parameter_names
+from transformers.trainer_utils import get_last_checkpoint, is_main_process
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-check_min_version("4.45.0.dev0")
+check_min_version("4.46.0.dev0")
 
 require_version("datasets>=1.18.0", "To fix: pip install -r examples/pytorch/speech-recognition/requirements.txt")
 
@@ -164,22 +165,11 @@ class DataTrainingArguments:
     dataset_name: str = field(
         metadata={"help": "The configuration name of the dataset to use (via the datasets library)."}
     )
-    target_language: Optional[str] = field(
-        metadata={
-            "help": (
-                "The target language on which the adapter attention layers"
-                " should be trained on in ISO 693-3 code, e.g. `tur` for Turkish"
-                " Wav2Vec2's MMS ISO codes can be looked up here: https://dl.fbaipublicfiles.com/mms/misc/language_coverage_mms.html"
-                " If you are not training the adapter layers on a language, simply choose"
-                " another acronym that fits your data."
-            )
-        },
+    dataset_config_name: str = field(
+        default=None, metadata={"help": "The configuration name of the dataset to use (via the datasets library)."}
     )
     data_files_type: str = field(
         default="csv", metadata={"help": "The data file types of the dataset to use (via the datasets library)."}
-    )
-    dataset_config_name: str = field(
-        default=None, metadata={"help": "The configuration name of the dataset to use (via the datasets library)."}
     )
     train_split_name: str = field(
         default="train+validation",
@@ -318,7 +308,6 @@ class DataTrainingArguments:
         default=False,
         metadata={"help": ("If :obj:`True`, will overwrite existing `target_language` vocabulary of tokenizer.")},
     )
-
 
 @dataclass
 class DataCollatorCTCWithPadding:
@@ -641,7 +630,6 @@ def main():
         config=config,
         token=data_args.token,
         trust_remote_code=data_args.trust_remote_code,
-        ignore_mismatched_sizes=True,
     )
 
     # freeze encoder
@@ -655,14 +643,9 @@ def main():
 
     # make sure that dataset decodes audio with correct sampling rate
     raw_datasets = raw_datasets.cast_column(
-    	data_args.audio_column_name,
-	datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate)
+        data_args.audio_column_name,
+        datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate)
 	)
-    #dataset_sampling_rate = next(iter(raw_datasets.values())).features[data_args.audio_column_name].sampling_rate
-    #if dataset_sampling_rate != feature_extractor.sampling_rate:
-    #    raw_datasets = raw_datasets.cast_column(
-    #        data_args.audio_column_name, datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate)
-    #    )
 
     # derive max & min input length for sample rate & max duration
     max_input_length = data_args.max_duration_in_seconds * feature_extractor.sampling_rate
