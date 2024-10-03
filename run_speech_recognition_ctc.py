@@ -511,6 +511,13 @@ def main():
     def remove_special_characters(batch):
         if chars_to_ignore_regex is not None:
             batch["target_text"] = re.sub(chars_to_ignore_regex, "", batch[text_column_name]).lower() + " "
+            batch["target_text"] = re.sub("â", "a", batch[text_column_name]).lower() + " "
+            batch["target_text"] = re.sub("à", "a", batch[text_column_name]).lower() + " "
+            batch["target_text"] = re.sub("ģ", "g", batch[text_column_name]).lower() + " "
+            batch["target_text"] = re.sub("\n", "", batch[text_column_name]).lower() + " "
+            batch["target_text"] = re.sub("á", "a", batch[text_column_name]).lower() + " "
+            batch["target_text"] = re.sub("\(", "", batch[text_column_name]).lower() + " "
+            batch["target_text"] = re.sub("\)", "", batch[text_column_name]).lower() + " "
         else:
             batch["target_text"] = batch[text_column_name].lower() + " "
         return batch
@@ -754,31 +761,6 @@ def main():
     data_collator = DataCollatorCTCWithPadding(
         processor=processor, feature_extractor_input_name=feature_extractor_input_name
     )
-
-    # setting the bnb
-    decay_parameters = get_parameter_names(model, [torch.nn.LayerNorm])
-    decay_parameters = [name for name in decay_parameters if "bias" not in name]
-
-    optimizer_grouped_parameters = [
-        {       
-                "params": [p for n, p in model.named_parameters() if n in decay_parameters],
-                "weight_decay": training_args.weight_decay,
-        },
-        {
-                "params": [p for n, p in model.named_parameters() if n not in decay_parameters],
-                "weight_decay": 0.0,
-        }
-        ]
-    # Initialize optimizer
-    optimizer = bnb.optim.Adam8bit(
-        params=optimizer_grouped_parameters,
-        lr=training_args.learning_rate,
-        betas=(training_args.adam_beta1, training_args.adam_beta2),
-        eps=training_args.adam_epsilon,
-        )
-
-    # Set optimizers
-    optimizers = (optimizer, None)
 
     # Initialize Trainer
     trainer = Trainer(
