@@ -29,7 +29,6 @@ from typing import Dict, List, Optional, Union
 import datasets
 import evaluate
 import torch
-import bitsandbytes as bnb
 from datasets import DatasetDict, load_dataset
 
 import transformers
@@ -43,24 +42,20 @@ from transformers import (
     Trainer,
     TrainingArguments,
     Wav2Vec2Processor,
-    EarlyStoppingCallback,
     set_seed,
 )
-
-from transformers.trainer_pt_utils import get_parameter_names
 from transformers.trainer_utils import get_last_checkpoint, is_main_process
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-check_min_version("4.46.0.dev0")
+check_min_version("4.48.0.dev0")
 
 require_version("datasets>=1.18.0", "To fix: pip install -r examples/pytorch/speech-recognition/requirements.txt")
 
 
 logger = logging.getLogger(__name__)
-
 os.environ["WANDB_DISABLED"] = "true"
 
 def list_field(default=None, metadata=None):
@@ -249,7 +244,7 @@ class DataTrainingArguments:
         },
     )
     min_duration_in_seconds: float = field(
-        default=2.0, metadata={"help": "Filter audio files that are shorter than `min_duration_in_seconds` seconds"}
+        default=5.0, metadata={"help": "Filter audio files that are shorter than `min_duration_in_seconds` seconds"}
     )
     preprocessing_only: bool = field(
         default=False,
@@ -304,10 +299,7 @@ class DataTrainingArguments:
             )
         },
     )
-    overwrite_lang_vocab: bool = field(
-        default=False,
-        metadata={"help": ("If :obj:`True`, will overwrite existing `target_language` vocabulary of tokenizer.")},
-    )
+
 
 @dataclass
 class DataCollatorCTCWithPadding:
@@ -478,6 +470,14 @@ def main():
                                 )
 
     if training_args.do_train:
+        #raw_datasets["train"] = load_dataset(
+        #    data_args.dataset_name,
+        #    data_args.dataset_config_name,
+        #    split=data_args.train_split_name,
+        #    token=data_args.token,
+        #    trust_remote_code=data_args.trust_remote_code,
+        #)
+
         if data_args.audio_column_name not in raw_datasets["train"].column_names:
             raise ValueError(
                 f"--audio_column_name '{data_args.audio_column_name}' not found in dataset '{data_args.dataset_name}'."
@@ -496,6 +496,14 @@ def main():
             raw_datasets["train"] = raw_datasets["train"].select(range(data_args.max_train_samples))
 
     if training_args.do_eval:
+        #raw_datasets["eval"] = load_dataset(
+        #    data_args.dataset_name,
+        #    data_args.dataset_config_name,
+        #    split=data_args.eval_split_name,
+        #    token=data_args.token,
+        #    trust_remote_code=data_args.trust_remote_code,
+        #)
+
         if data_args.max_eval_samples is not None:
             raw_datasets["eval"] = raw_datasets["eval"].select(range(data_args.max_eval_samples))
 
@@ -511,13 +519,6 @@ def main():
     def remove_special_characters(batch):
         if chars_to_ignore_regex is not None:
             batch["target_text"] = re.sub(chars_to_ignore_regex, "", batch[text_column_name]).lower() + " "
-            batch["target_text"] = re.sub("â", "a", batch[text_column_name]).lower() + " "
-            batch["target_text"] = re.sub("à", "a", batch[text_column_name]).lower() + " "
-            batch["target_text"] = re.sub("ģ", "g", batch[text_column_name]).lower() + " "
-            batch["target_text"] = re.sub("\n", "", batch[text_column_name]).lower() + " "
-            batch["target_text"] = re.sub("á", "a", batch[text_column_name]).lower() + " "
-            batch["target_text"] = re.sub("\(", "", batch[text_column_name]).lower() + " "
-            batch["target_text"] = re.sub("\)", "", batch[text_column_name]).lower() + " "
         else:
             batch["target_text"] = batch[text_column_name].lower() + " "
         return batch
@@ -650,9 +651,14 @@ def main():
 
     # make sure that dataset decodes audio with correct sampling rate
     raw_datasets = raw_datasets.cast_column(
-        data_args.audio_column_name,
-        datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate)
-	)
+      data_args.audio_column_name,
+      datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate)
+      )
+    #dataset_sampling_rate = next(iter(raw_datasets.values())).features[data_args.audio_column_name].sampling_rate
+    #if dataset_sampling_rate != feature_extractor.sampling_rate:
+    #    raw_datasets = raw_datasets.cast_column(
+    #        data_args.audio_column_name, datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate)
+    #    )
 
     # derive max & min input length for sample rate & max duration
     max_input_length = data_args.max_duration_in_seconds * feature_extractor.sampling_rate
@@ -770,9 +776,8 @@ def main():
         compute_metrics=compute_metrics,
         train_dataset=vectorized_datasets["train"] if training_args.do_train else None,
         eval_dataset=vectorized_datasets["eval"] if training_args.do_eval else None,
-        tokenizer=processor,
+        processing_class=processor,
         preprocess_logits_for_metrics=preprocess_logits_for_metrics,
-        callbacks=[EarlyStoppingCallback(3)]
     )
 
     # 8. Finally, we can start training
