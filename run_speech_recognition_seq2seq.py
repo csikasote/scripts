@@ -48,13 +48,14 @@ from transformers.utils.versions import require_version
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-#check_min_version("4.45.0.dev0")
+#check_min_version("4.48.0.dev0")
 
 require_version("datasets>=1.18.0", "To fix: pip install -r examples/pytorch/speech-recognition/requirements.txt")
 
+os.environ["WANDB_DISABLED"] = "true"
+
 logger = logging.getLogger(__name__)
 
-os.environ["WANDB_DISABLED"] = "true"
 
 @dataclass
 class ModelArguments:
@@ -190,7 +191,7 @@ class DataTrainingArguments:
         },
     )
     min_duration_in_seconds: float = field(
-        default=0.2, metadata={"help": "Filter audio files that are shorter than `min_duration_in_seconds` seconds"}
+        default=0.0, metadata={"help": "Filter audio files that are shorter than `min_duration_in_seconds` seconds"}
     )
     preprocessing_only: bool = field(
         default=False,
@@ -354,6 +355,7 @@ def main():
     set_seed(training_args.seed)
 
     # 4. Load dataset
+    #raw_datasets = DatasetDict()
     raw_datasets = load_dataset(data_args.data_files_type, 
     				data_files={
     					data_args.train_split_name: data_args.train_split_path,
@@ -361,29 +363,25 @@ def main():
     				delimiter="\t"
     				)
 
-    if training_args.do_train:
-        if data_args.audio_column_name not in raw_datasets["train"].column_names:
-            raise ValueError(
-                f"--audio_column_name '{data_args.audio_column_name}' not found in dataset '{data_args.dataset_name}'."
-                " Make sure to set `--audio_column_name` to the correct audio column - one of"
-                f" {', '.join(raw_datasets['train'].column_names)}."
-            )
+    #if training_args.do_train:
+        #raw_datasets["train"] = load_dataset(
+        #    data_args.dataset_name,
+        #    data_args.dataset_config_name,
+        #    split=data_args.train_split_name,
+        #    cache_dir=model_args.cache_dir,
+        #    token=model_args.token,
+        #    trust_remote_code=model_args.trust_remote_code,
+        #)
 
-        if data_args.text_column_name not in raw_datasets["train"].column_names:
-            raise ValueError(
-                f"--text_column_name {data_args.text_column_name} not found in dataset '{data_args.dataset_name}'. "
-                "Make sure to set `--text_column_name` to the correct text column - one of "
-                f"{', '.join(raw_datasets['train'].column_names)}."
-            )
-
-        if data_args.max_train_samples is not None:
-            raw_datasets["train"] = raw_datasets["train"].select(range(data_args.max_train_samples))
-
-
-    if training_args.do_eval:
-        if data_args.max_eval_samples is not None:
-            raw_datasets["eval"] = raw_datasets["eval"].select(range(data_args.max_eval_samples))
-
+    #if training_args.do_eval:
+        #raw_datasets["eval"] = load_dataset(
+        #    data_args.dataset_name,
+        #    data_args.dataset_config_name,
+        #    split=data_args.eval_split_name,
+        #    cache_dir=model_args.cache_dir,
+        #    token=model_args.token,
+        #    trust_remote_code=model_args.trust_remote_code,
+        #)
 
     if data_args.audio_column_name not in next(iter(raw_datasets.values())).column_names:
         raise ValueError(
@@ -479,11 +477,6 @@ def main():
         model.generation_config.suppress_tokens = model_args.suppress_tokens
 
     # 6. Resample speech dataset if necessary
-    #dataset_sampling_rate = next(iter(raw_datasets.values())).features[data_args.audio_column_name].sampling_rate
-    #if dataset_sampling_rate != feature_extractor.sampling_rate:
-    #    raw_datasets = raw_datasets.cast_column(
-    #        data_args.audio_column_name, datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate)
-    #    )
     raw_datasets = raw_datasets.cast_column(
             data_args.audio_column_name, datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate)
         )
@@ -597,7 +590,7 @@ def main():
         args=training_args,
         train_dataset=vectorized_datasets["train"] if training_args.do_train else None,
         eval_dataset=vectorized_datasets["eval"] if training_args.do_eval else None,
-        tokenizer=feature_extractor,
+        processing_class=feature_extractor,
         data_collator=data_collator,
         compute_metrics=compute_metrics if training_args.predict_with_generate else None,
     )
