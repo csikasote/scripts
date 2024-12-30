@@ -42,6 +42,7 @@ from transformers import (
     Trainer,
     TrainingArguments,
     Wav2Vec2Processor,
+    EarlyStoppingCallback,
     set_seed,
 )
 from transformers.trainer_utils import get_last_checkpoint, is_main_process
@@ -779,6 +780,7 @@ def main():
         eval_dataset=vectorized_datasets["eval"] if training_args.do_eval else None,
         tokenizer=processor,
         preprocess_logits_for_metrics=preprocess_logits_for_metrics,
+        callbacks=[EarlyStoppingCallback(3)]
     )
 
     # 8. Finally, we can start training
