@@ -81,7 +81,7 @@ def main(args):
           delimiter="\t")[args.split]
 
     # Only uncomment for debugging
-    dataset = dataset.take(args.max_eval_samples)
+    #dataset = dataset.take(args.max_eval_samples)
 
     dataset = dataset.cast_column("audio", Audio(sampling_rate=16000))
     dataset = dataset.map(normalise)
@@ -97,15 +97,17 @@ def main(args):
 
     wer = wer_metric.compute(references=references, predictions=predictions)
     wer = round(100 * wer, 2)
-
-    #wer_list = []
-    #for r, p in list(zip(references,predictions)):
-    #    sentence_wer = wer_metric.compute(references=[r], predictions=[p])
-    #    wer_list.append(round(100*sentence_wer, 2))
-    #wer_df = pd.DataFrame(wer_list, columns=['wer'])
-    #wer_df.to_csv(args.output, index=False, header=None)
-
+    
     print("WER:", wer)
+    print(len(predictions), len(references))
+
+    wer_list = []
+    for i in list(zip(references,predictions)):
+        sentence_wer = wer_metric.compute(references=[i[0]], predictions=[i[1]])
+        wer_list.append(round(100*sentence_wer, 2))
+    wer_df = pd.DataFrame(wer_list, columns=['wer'])
+    wer_df.to_csv(args.output, index=False)
+    print("Successfully saved the list of WER")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
