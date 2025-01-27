@@ -22,8 +22,8 @@ do
   for file_name in ${split_list[@]};
   do
     csv_test_path="/content/${dataset}/splits/${split_name}/test_${file_name}_file_processed.tsv"
-    output_file="/content/${split_name}_wer.csv"
-    echo $split_name
+    output_file="/content/${file_name}_wer.csv"
+    echo $file_name
     python run_eval_whisper_modelv2.py \
       --model_id=$model_id \
       --dataset=$dataset \
