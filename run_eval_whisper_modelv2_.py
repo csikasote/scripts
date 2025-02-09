@@ -104,12 +104,12 @@ def main(args):
     wer = round(100 * wer, 2)
     
     print("WER:", wer)
-    print(len(predictions), len(references))
+    #print(len(predictions), len(references))
 
     wer_list = []
-    for i in list(zip(references,predictions)):
-        sentence_wer = wer_metric.compute(references=[i[0]], predictions=[i[1]])
-        wer_list.append(round(100*sentence_wer, 2))
+    for r, p in list(zip(references,predictions)):
+        sentence_wer = 100 * wer_metric.compute(references=[r], predictions=[p])
+        wer_list.append(round(sentence_wer, 2))
     wer_df = pd.DataFrame(wer_list, columns=['wer'])
     wer_df.to_csv(args.output, index=False)
     print("Successfully saved the list of WER")
