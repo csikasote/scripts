@@ -963,7 +963,7 @@ class Wav2Vec2EncoderLayerStableLayerNorm(nn.Module):
 
         # Added New Adapter Here
         if getattr(config, "adapter_attn_dim", None) is not None:
-                    self.adapter_layer = Wav2Vec2AttnAdapterLayer(config)
+            self.adapter_layer = Wav2Vec2AttnAdapterLayer(config)
         else:
             self.adapter_layer = None
         self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -986,10 +986,10 @@ class Wav2Vec2EncoderLayerStableLayerNorm(nn.Module):
         hidden_states, attn_weights, _ = self.attention(
             hidden_states, attention_mask=attention_mask, output_attentions=output_attentions
         )                                                                                       # MHSA
-        
+
         hidden_states = self.dropout(hidden_states)                                             # Dropout Layer
 
-        # Added for extra adapter Here
+        # Added extra adapter Here
         if self.adapter_layer is not None:
             hidden_states = hidden_states + self.adapter_layer(hidden_states)                   # Adapter Module 1
         
