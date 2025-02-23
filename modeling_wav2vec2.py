@@ -890,7 +890,8 @@ WAV2VEC2_ATTENTION_CLASSES = {
     "flash_attention_2": Wav2Vec2FlashAttention2,
 }
 
-
+# Implementation of the FeedForward  Layer in the Transformer
+# There are two feedward layers: After the MHSA and After
 class Wav2Vec2FeedForward(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -900,7 +901,7 @@ class Wav2Vec2FeedForward(nn.Module):
         if isinstance(config.hidden_act, str):
             self.intermediate_act_fn = ACT2FN[config.hidden_act]
         else:
-            self.intermediate_act_fn = config.hidden_act
+            self.intermediate_act_fn = config.hidden_act                    # Hidden Activation: GELU
 
         self.output_dense = nn.Linear(config.intermediate_size, config.hidden_size)
         self.output_dropout = nn.Dropout(config.hidden_dropout)
@@ -909,12 +910,11 @@ class Wav2Vec2FeedForward(nn.Module):
         hidden_states = self.intermediate_dense(hidden_states)
         hidden_states = self.intermediate_act_fn(hidden_states)
         hidden_states = self.intermediate_dropout(hidden_states)
-
         hidden_states = self.output_dense(hidden_states)
         hidden_states = self.output_dropout(hidden_states)
         return hidden_states
 
-
+# Transformer Wav2Vec2 Encoder Layer: [--> MHSA -> LayerNorm -> 2xFC -> LayerNorm ->]
 class Wav2Vec2EncoderLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -923,7 +923,7 @@ class Wav2Vec2EncoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             dropout=config.attention_dropout,
             is_decoder=False,
-        )
+        )                                                                                   
 
         self.dropout = nn.Dropout(config.hidden_dropout)
         self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -934,13 +934,13 @@ class Wav2Vec2EncoderLayer(nn.Module):
         attn_residual = hidden_states
         hidden_states, attn_weights, _ = self.attention(
             hidden_states, attention_mask=attention_mask, output_attentions=output_attentions
-        )
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = attn_residual + hidden_states
+        )                                                                                       # MHSA Layer
+        hidden_states = self.dropout(hidden_states)                                             # Dropped Layer
+        hidden_states = attn_residual + hidden_states                                           # Skip Connection + Hidden State
 
-        hidden_states = self.layer_norm(hidden_states)
-        hidden_states = hidden_states + self.feed_forward(hidden_states)
-        hidden_states = self.final_layer_norm(hidden_states)
+        hidden_states = self.layer_norm(hidden_states)                                          # LayerNorm
+        hidden_states = hidden_states + self.feed_forward(hidden_states)                        # W2V2FFN
+        hidden_states = self.final_layer_norm(hidden_states)                                    # LayerNorm
 
         outputs = (hidden_states,)
 
@@ -949,7 +949,7 @@ class Wav2Vec2EncoderLayer(nn.Module):
 
         return outputs
 
-
+# Implemetation of the Encoder Layers with Adapters
 class Wav2Vec2EncoderLayerStableLayerNorm(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -961,12 +961,6 @@ class Wav2Vec2EncoderLayerStableLayerNorm(nn.Module):
         )
         self.dropout = nn.Dropout(config.hidden_dropout)
         self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        # Modified to have two adapters in the Encoder Layer
-        if getattr(config, "adapter_attn_dim", None) is not None:
-            self.adapter_layer = Wav2Vec2AttnAdapterLayer(config)
-        else:
-            self.adapter_layer = None
-
         self.feed_forward = Wav2Vec2FeedForward(config)
         self.final_layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
@@ -985,18 +979,19 @@ class Wav2Vec2EncoderLayerStableLayerNorm(nn.Module):
         hidden_states = self.layer_norm(hidden_states)
         hidden_states, attn_weights, _ = self.attention(
             hidden_states, attention_mask=attention_mask, output_attentions=output_attentions
-        )
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = attn_residual + hidden_states
-        # Added for Extra Adapter Here
+        )                                                                                       # MHSA
+        # Added for extra adapter Here
         if self.adapter_layer is not None:
-            hidden_states = hidden_states + self.adapter_layer(hidden_states)
-
+            hidden_states = hidden_states + self.adapter_layer(hidden_states)                   # Adapter Module 1
+        
+        hidden_states = self.dropout(hidden_states)                                             # Dropout Layer
+        hidden_states = attn_residual + hidden_states                                           # Skip Connection + Hidden State
         hidden_states = hidden_states + self.feed_forward(self.final_layer_norm(hidden_states))
 
+        # Original adapter code
         if self.adapter_layer is not None:
-            hidden_states = hidden_states + self.adapter_layer(hidden_states)
-
+            hidden_states = hidden_states + self.adapter_layer(hidden_states)                   # Adapter Module 2
+ 
         outputs = (hidden_states,)
 
         if output_attentions:
@@ -1285,7 +1280,7 @@ class Wav2Vec2Adapter(nn.Module):
         hidden_states = hidden_states.transpose(1, 2)
         return hidden_states
 
-
+# Adapter module with Conv layers
 class Wav2Vec2AdapterLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -1303,7 +1298,7 @@ class Wav2Vec2AdapterLayer(nn.Module):
 
         return hidden_states
 
-
+# Implementation of Houslby Adapter Structure
 class Wav2Vec2AttnAdapterLayer(nn.Module):
     def __init__(self, config):
         """
@@ -1311,20 +1306,20 @@ class Wav2Vec2AttnAdapterLayer(nn.Module):
         up training throughput.
         """
         super().__init__()
-        self.input_dim = config.adapter_attn_dim
-        self.hidden_dim = config.hidden_size
+        self.input_dim = config.adapter_attn_dim                    # Attention dimension defaulted to 16
+        self.hidden_dim = config.hidden_size                        # Inner dimension of the projection is defaulted to 1024
 
-        self.norm = nn.LayerNorm(self.hidden_dim)
-        self.linear_1 = nn.Linear(self.hidden_dim, self.input_dim)
-        self.act_fn = nn.ReLU()
-        self.linear_2 = nn.Linear(self.input_dim, self.hidden_dim)
+        self.norm = nn.LayerNorm(self.hidden_dim)                   # LayerNormalization
+        self.linear_1 = nn.Linear(self.hidden_dim, self.input_dim)  # Downward linear projection
+        self.act_fn = nn.ReLU()                                     # RELU activation function
+        self.linear_2 = nn.Linear(self.input_dim, self.hidden_dim)  # Upward linear projection
 
     def forward(self, hidden_states: torch.FloatTensor):
-        hidden_states = self.norm(hidden_states)
+        hidden_states = self.norm(hidden_states)                    # LayerNormalization
 
-        hidden_states = self.linear_1(hidden_states)
-        hidden_states = self.act_fn(hidden_states)
-        hidden_states = self.linear_2(hidden_states)
+        hidden_states = self.linear_1(hidden_states)                # Downward linear projection
+        hidden_states = self.act_fn(hidden_states)                  # Activation function
+        hidden_states = self.linear_2(hidden_states)                # Upward linear projection
 
         return hidden_states
 
