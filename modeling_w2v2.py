@@ -4,7 +4,7 @@ import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import CrossEntropyLoss
-from typing import List, Tuple, Union, Optional
+from typing import List, Tuple, Union, Optional, Dict
 
 from transformers.models.wav2vec2.modeling_wav2vec2 import (
     Wav2Vec2Attention, 
@@ -1127,11 +1127,20 @@ class Wav2Vec2PreTrainedModel(PreTrainedModel):
         # set target language correctly
         self.target_lang = target_lang
 
-    def enable_adapter_fusion(self, adapter_names):
+    # --- Adapter Fusion helpers ---
+    def enable_adapter_fusion(self, adapter_names: List[str]):
+        """Turn on adapter fusion across all encoder layers.
+
+        This updates self.config flags and (re)creates fusion layers where
+        applicable. Call before training/eval. If you call this after a model
+        has been created, it will attach fusion modules lazily where missing.
+        """
         if not isinstance(adapter_names, (list, tuple)) or len(adapter_names) == 0:
             raise ValueError("adapter_names must be a non-empty list of strings")
         self.config.adapter_fusion = True
         self.config.fusion_adapter_names = list(adapter_names)
+
+        # Walk encoder layers and ensure fusion layer exists
         encoder = getattr(getattr(self, "wav2vec2", self), "encoder", None)
         if encoder is None:
             return
@@ -1139,43 +1148,109 @@ class Wav2Vec2PreTrainedModel(PreTrainedModel):
             if hasattr(layer, "adapter_fusion_layer"):
                 if layer.adapter_fusion_layer is None:
                     layer.adapter_fusion_layer = Wav2Vec2AdapterFusionLayer(self.config, self.config.fusion_adapter_names)
+                else:
+                    # ensure names are in sync
+                    if layer.adapter_fusion_layer.adapter_names != self.config.fusion_adapter_names:
+                        layer.adapter_fusion_layer = Wav2Vec2AdapterFusionLayer(self.config, self.config.fusion_adapter_names)
             else:
+                # Older variant: add attribute dynamically
                 layer.adapter_fusion_layer = Wav2Vec2AdapterFusionLayer(self.config, self.config.fusion_adapter_names)
 
-    def _remap_adapter_keys_for_fusion(self, state_dict, name):
+    def _remap_adapter_keys_for_fusion(self, state_dict: Dict[str, torch.Tensor], name: str) -> Dict[str, torch.Tensor]:
+        """Remap single-adapter keys to fusion adapter ModuleDict slot.
+
+        Example:
+          wav2vec2.encoder.layers.0.adapter_layer.linear_1.weight ->
+          wav2vec2.encoder.layers.0.adapter_fusion_layer.adapters.{name}.linear_1.weight
+        """
         remapped = {}
         for k, v in state_dict.items():
             if ".adapter_layer." in k and ".encoder.layers." in k:
                 remapped[k.replace(".adapter_layer.", f".adapter_fusion_layer.adapters.{name}.")] = v
+            elif k.startswith("lm_head."):
+                # We skip lm_head by default; if the size matches current, you could set it explicitly.
+                # remapped[k] = v  # uncomment to allow overwrite when sizes match
+                continue
             else:
+                # keep unrelated keys (rare), they will be ignored by strict=False
                 remapped[k] = v
         return remapped
 
-    def load_adapter_as(self, target_lang:str, name, force_load=True, **kwargs):
+    def load_adapter_as(self, target_lang: str, name: str, force_load=True, **kwargs):
+        """Load a language adapter and register it into the fusion slot under `name`.
+
+        Internally reuses load_adapter's file resolution, then remaps keys into
+        adapter_fusion submodules. Ensure you called enable_adapter_fusion([...])
+        beforehand (or pass a name list including `name`).
+        """
         if getattr(self.config, "adapter_attn_dim", None) is None:
             raise ValueError("Cannot load adapter if config.adapter_attn_dim is not defined.")
         if not getattr(self.config, "adapter_fusion", False):
+            # Implicitly enable fusion with the single name if not enabled yet
             self.enable_adapter_fusion([name])
+
+        # Reuse upstream loader to get state_dict (without assigning)
+        cache_dir = kwargs.pop("cache_dir", None)
+        force_download = kwargs.pop("force_download", False)
+        proxies = kwargs.pop("proxies", None)
+        local_files_only = kwargs.pop("local_files_only", False)
+        token = kwargs.pop("token", None)
+        revision = kwargs.pop("revision", None)
+        use_safetensors = kwargs.pop("use_safetensors", None)
+
+        # Borrow logic from load_adapter but stop right after getting `state_dict`.
+        model_path_or_id = self.config._name_or_path
+        state_dict = None
+
         WAV2VEC2_ADAPTER_SAFE_FILE = "adapter.{}.safetensors"
         WAV2VEC2_ADAPTER_PT_FILE = "adapter.{}.bin"
-        state_dict = None
-        if is_safetensors_available():
+        if is_safetensors_available() and use_safetensors is not False:
             try:
                 from safetensors.torch import load_file as safe_load_file
-                weight_path = cached_file(self.config._name_or_path, filename=WAV2VEC2_ADAPTER_SAFE_FILE.format(target_lang), **kwargs)
+                weight_path = cached_file(
+                    model_path_or_id,
+                    filename=WAV2VEC2_ADAPTER_SAFE_FILE.format(target_lang),
+                    force_download=force_download,
+                    proxies=proxies,
+                    local_files_only=local_files_only,
+                    token=token,
+                    revision=revision,
+                    cache_dir=cache_dir,
+                )
                 state_dict = safe_load_file(weight_path)
             except Exception:
                 state_dict = None
         if state_dict is None:
             try:
-                weight_path = cached_file(self.config._name_or_path, filename=WAV2VEC2_ADAPTER_PT_FILE.format(target_lang), **kwargs)
+                weight_path = cached_file(
+                    model_path_or_id,
+                    filename=WAV2VEC2_ADAPTER_PT_FILE.format(target_lang),
+                    force_download=force_download,
+                    proxies=proxies,
+                    local_files_only=local_files_only,
+                    token=token,
+                    revision=revision,
+                    cache_dir=cache_dir,
+                )
                 check_torch_load_is_safe()
-                state_dict = torch.load(weight_path, map_location="cpu", weights_only=True)
+                import torch as _torch
+                state_dict = _torch.load(weight_path, map_location="cpu", weights_only=True)
             except Exception as e:
                 raise e
+
+        # Remap keys into fusion namespace
         remapped = self._remap_adapter_keys_for_fusion(state_dict, name)
+
+        # Ensure fusion modules exist (in case called before forward)
         self.enable_adapter_fusion(list({*getattr(self.config, "fusion_adapter_names", []), name}))
-        self.load_state_dict(remapped, strict=False)
+
+        # Load with strict=False (ignore unrelated keys)
+        missing, unexpected = self.load_state_dict(remapped, strict=False)
+        # Optional: sanity logging
+        if len(unexpected) > 0:
+            import warnings
+            warnings.warn(f"Unexpected keys while loading fusion adapter '{name}': {sorted(list(unexpected))[:5]} ...")
+        return True
 
 @auto_docstring
 class Wav2Vec2Model(Wav2Vec2PreTrainedModel):
