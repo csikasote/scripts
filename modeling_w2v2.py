@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import CrossEntropyLoss
 from typing import List, Tuple, Union, Optional, Dict
+import warnings
 
 from transformers.models.wav2vec2.modeling_wav2vec2 import (
     Wav2Vec2Attention, 
@@ -1128,6 +1129,35 @@ class Wav2Vec2PreTrainedModel(PreTrainedModel):
         self.target_lang = target_lang
 
     # --- Adapter Fusion helpers ---
+    def _get_adapter_fusions(self):
+        if self.config.adapter_attn_dim is None:
+            raise ValueError(f"{self.__class__} has no adapter fusion layers. Make sure to define `config.adapter_attn_dim`.")
+
+        adapter_fusion_weights = {}
+        for name, module in self.named_modules():
+            if isinstance(module, Wav2Vec2AdapterFusionLayer):
+                for param_name, param in module.named_parameters():
+                    adapter_fusion_weights[".".join([name, param_name])] = param
+
+        if isinstance(self, Wav2Vec2ForCTC):
+            for name, param in self.lm_head.named_parameters():
+                adapter_fusion_weights[".".join(["lm_head", name])] = param
+
+        return adapter_fusion_weights
+
+    def init_adapter_fusion_layers(self):
+        """
+        (Re-)initialize attention adapter layers and lm head for adapter-fusion-only fine-tuning
+        """
+        # init attention adapter fusion
+        for module in self.modules():
+            if isinstance(module, Wav2Vec2AdapterFusionLayer):
+                self._init_weights(module)
+
+        # init lm head
+        if isinstance(self, Wav2Vec2ForCTC):
+            self._init_weights(self.lm_head)
+
     def enable_adapter_fusion(self, adapter_names: List[str]):
         """Turn on adapter fusion across all encoder layers.
 
@@ -1202,9 +1232,8 @@ class Wav2Vec2PreTrainedModel(PreTrainedModel):
         model_path_or_id = self.config._name_or_path
         state_dict = None
 
-        WAV2VEC2_ADAPTER_SAFE_FILE = "adapter.{}.safetensors"
-        WAV2VEC2_ADAPTER_PT_FILE = "adapter.{}.bin"
         if is_safetensors_available() and use_safetensors is not False:
+            WAV2VEC2_ADAPTER_SAFE_FILE = "adapter.{}.safetensors"
             try:
                 from safetensors.torch import load_file as safe_load_file
                 weight_path = cached_file(
@@ -1220,7 +1249,9 @@ class Wav2Vec2PreTrainedModel(PreTrainedModel):
                 state_dict = safe_load_file(weight_path)
             except Exception:
                 state_dict = None
+
         if state_dict is None:
+            WAV2VEC2_ADAPTER_PT_FILE = "adapter.{}.bin"
             try:
                 weight_path = cached_file(
                     model_path_or_id,
@@ -1233,8 +1264,7 @@ class Wav2Vec2PreTrainedModel(PreTrainedModel):
                     cache_dir=cache_dir,
                 )
                 check_torch_load_is_safe()
-                import torch as _torch
-                state_dict = _torch.load(weight_path, map_location="cpu", weights_only=True)
+                state_dict = torch.load(weight_path, map_location="cpu", weights_only=True)
             except Exception as e:
                 raise e
 
@@ -1245,12 +1275,23 @@ class Wav2Vec2PreTrainedModel(PreTrainedModel):
         self.enable_adapter_fusion(list({*getattr(self.config, "fusion_adapter_names", []), name}))
 
         # Load with strict=False (ignore unrelated keys)
-        missing, unexpected = self.load_state_dict(remapped, strict=False)
+        missing_keys, unexpected_keys = self.load_state_dict(remapped, strict=False)
+
         # Optional: sanity logging
-        if len(unexpected) > 0:
-            import warnings
-            warnings.warn(f"Unexpected keys while loading fusion adapter '{name}': {sorted(list(unexpected))[:5]} ...")
+        if len(unexpected_keys) > 0:
+            warnings.warn(f"Unexpected keys while loading fusion adapter '{name}': {sorted(list(unexpected_keys))[:5]} ...")
+        elif len(missing_keys) > 0:
+            warnings.warn(f"Unexpected keys while loading fusion adapter '{name}': {sorted(list(missing_keys))[:5]} ...")
         return True
+    
+        #adapter_weights = self._get_adapters()
+        #unexpected_keys = set(state_dict.keys()) - set(adapter_weights.keys())
+        #missing_keys = set(adapter_weights.keys()) - set(state_dict.keys())
+
+        #if len(unexpected_keys) > 0:
+        #    raise ValueError(f"The adapter weights {weight_path} has unexpected keys: {', '.join(unexpected_keys)}.")
+        #elif len(missing_keys) > 0:
+        #    raise ValueError(f"The adapter weights {weight_path} has missing keys: {', '.join(missing_keys)}.")
 
 @auto_docstring
 class Wav2Vec2Model(Wav2Vec2PreTrainedModel):
