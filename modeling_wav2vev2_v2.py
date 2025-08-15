@@ -890,7 +890,10 @@ class Wav2Vec2AdapterFusionLayer(nn.Module):
         # init value as ~identity to start near "just pass adapter output"
         nn.init.eye_(self.v.weight)  # (C, C)
 
-        self.register_buffer("temp", torch.tensor(float(temp)), persistent=True)
+        self.temp = temp
+        self.reduction = self.temp / 1000.0
+        
+        #self.register_buffer("temp", torch.tensor(float(temp)), persistent=True)
         self.dropout = nn.Dropout(attn_dropout)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -906,7 +909,13 @@ class Wav2Vec2AdapterFusionLayer(nn.Module):
         # 3) attention scores over adapter dim N
         # (B,T,1,C) @ (B,T,C,N) -> (B,T,1,N) -> (B,T,N)
         attention_scores = torch.matmul(Q.unsqueeze(2), K.transpose(-2, -1)).squeeze(2)
-        attention_probs = torch.softmax(self.dropout(attention_scores) / self.temp.clamp(min=1e-6), dim=-1)
+        attention_scores = self.dropout(attention_scores)
+
+        # Normalize the attention score to probabilities with a softmax
+        attention_probs = torch.softmax(dim=-1)(attention_scores / self.temp)
+        self.temp = max(self.temp - self.reduction, 1.0)
+
+        #attention_probs = torch.softmax(self.dropout(attention_scores) / self.temp.clamp(min=1e-6), dim=-1)
 
         # 4) weighted sum over N: (B,T,1,N) @ (B,T,N,C) -> (B,T,C)
         fused = torch.matmul(attention_probs.unsqueeze(2), V).squeeze(2)
@@ -1166,6 +1175,7 @@ class Wav2Vec2PreTrainedModel(PreTrainedModel):
         self.target_lang = target_lang
 
     # --- Adapter Fusion helpers ---
+    
     def _get_adapter_fusions(self):
         if self.config.adapter_attn_dim is None:
             raise ValueError(f"{self.__class__} has no adapter fusion layers. Make sure to define `config.adapter_attn_dim`.")
