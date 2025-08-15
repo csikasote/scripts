@@ -1205,6 +1205,17 @@ class Wav2Vec2PreTrainedModel(PreTrainedModel):
         if isinstance(self, Wav2Vec2ForCTC):
             self._init_weights(self.lm_head)
 
+    def _train_adapter_fusions(self):
+        """
+        Trains adapter fusion parameters and lm head only
+        """
+        for name, param in self.named_parameters():
+            param.requires_grad = (
+                    ".adapter_fusion_layer.q." in name
+                    or ".adapter_fusion_layer.k." in name
+                    or ".adapter_fusion_layer.v." in name
+                    or "lm_head" in name)
+            
     def enable_adapter_fusion(self, adapter_names: List[str]):
         """Turn on adapter fusion across all encoder layers.
 
