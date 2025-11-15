@@ -25,12 +25,18 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union
 
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+import numpy as np
+import gc
+
 import datasets
 import evaluate
 import torch
 import adapters
 from adapters import WhisperAdapterModel
 from datasets import DatasetDict, load_dataset
+from adapters import Seq2SeqAdapterTrainer
 
 import transformers
 from transformers import (
@@ -304,7 +310,6 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
         return batch
 
-
 def main():
     # 1. Parse input arguments
     # See all possible arguments in src/transformers/training_args.py
@@ -422,6 +427,7 @@ def main():
         token=model_args.token,
         trust_remote_code=model_args.trust_remote_code,
     )
+
     model = WhisperAdapterModel.from_pretrained(
         model_args.model_name_or_path,
         config=config,
@@ -512,6 +518,7 @@ def main():
         batch["input_length"] = len(sample["array"])
         if forward_attention_mask:
             batch["attention_mask"] = inputs.get("attention_mask")[0]
+        #batch["input_features"] = feature_extractor(sample["array"], sampling_rate=sample["sampling_rate"]).input_features[0]
 
         # process targets
         input_str = batch[text_column_name].lower() if do_lower_case else batch[text_column_name]
@@ -563,6 +570,84 @@ def main():
 
         return {"wer": wer}
 
+    def eval_loop():
+        device = model.device
+        model.eval()
+        for step, batch in enumerate(tqdm(vectorized_datasets["eval"])):
+            # ----- get single example -----
+            input_features = batch["input_features"]
+            labels = batch["labels"]
+
+            if isinstance(input_features, np.ndarray):
+                input_features = torch.from_numpy(input_features)
+            if isinstance(labels, np.ndarray):
+                labels = torch.from_numpy(labels)
+
+            if isinstance(input_features, list):
+                input_features = torch.tensor(input_features, dtype=torch.float32)
+            if isinstance(labels, list):
+                labels = torch.tensor(labels, dtype=torch.long)
+            
+            if input_features.dim() == 2:
+                input_features = input_features.unsqueeze(0)
+
+            attn_mask = torch.ones(
+                input_features.shape[:-1],  # (batch, time)
+                dtype=torch.long,
+                device=device,
+            )
+            if labels.dim() == 1:
+                labels = labels.unsqueeze(0)
+
+            input_features = input_features.to(device)
+            labels = labels.to(device)
+
+            with torch.cuda.amp.autocast():
+                with torch.no_grad():
+                    generated_tokens = (
+                        model.generate(
+                            input_features=input_features,
+                            attention_mask=attn_mask,
+                            decoder_input_ids=labels[:, :4], 
+                            max_new_tokens=255,
+                        )
+                        .cpu()
+                        .numpy()
+                    )
+                    labels = labels.cpu().numpy()
+                    labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+                    decoded_preds = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
+                    decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+                    metric.add_batch(
+                        predictions=decoded_preds,
+                        references=decoded_labels,
+                    )
+            del generated_tokens, labels, batch
+            gc.collect()
+        wer = 100 * metric.compute()
+        return wer
+
+    def eval_loop_():
+        # use the Trainer's prediction loop on your eval split
+        results = trainer.predict(vectorized_datasets["eval"])
+
+        pred_ids = results.predictions          # generated token ids
+        label_ids = results.label_ids           # label token ids
+
+        # replace ignore_index with pad_token_id for decoding
+        label_ids[label_ids == -100] = tokenizer.pad_token_id
+
+        # decode
+        pred_str = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
+        label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
+
+        # compute WER with your existing metric
+        wer = 100 * metric.compute(
+            predictions=pred_str,
+            references=label_str,
+        )
+        return wer
+
     # 9. Create a single speech processor
     # make sure all processes wait until data is saved
     with training_args.main_process_first():
@@ -581,19 +666,22 @@ def main():
         decoder_start_token_id=model.config.decoder_start_token_id,
         forward_attention_mask=forward_attention_mask,
     )
-
+    
+    #data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor)
     # 11. Initialize Trainer
-    trainer = Seq2SeqTrainer(
+    trainer = Seq2SeqAdapterTrainer(
         model=model,
         args=training_args,
         train_dataset=vectorized_datasets["train"] if training_args.do_train else None,
         eval_dataset=vectorized_datasets["eval"] if training_args.do_eval else None,
-        processing_class=feature_extractor,
+        tokenizer=tokenizer,
         data_collator=data_collator,
-        compute_metrics=compute_metrics if training_args.predict_with_generate else None,
+        #compute_metrics=compute_metrics if training_args.predict_with_generate else None,
     )
 
     print(model.adapter_summary())
+    initial_wer = eval_loop()
+    print(f"The initial wer score is: {initial_wer}")
 
     # 12. Training
     if training_args.do_train:
@@ -620,11 +708,13 @@ def main():
     results = {}
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
-        metrics = trainer.evaluate(
-            metric_key_prefix="eval",
-            max_length=training_args.generation_max_length,
-            num_beams=training_args.generation_num_beams,
-        )
+        #metrics = trainer.evaluate(
+        #    metric_key_prefix="eval",
+        #    max_length=training_args.generation_max_length,
+        #    num_beams=training_args.generation_num_beams,
+        #)
+        post_training_wer = eval_loop()
+        print(f"The wer score after training is: {post_training_wer}")
         max_eval_samples = (
             data_args.max_eval_samples if data_args.max_eval_samples is not None else len(vectorized_datasets["eval"])
         )
@@ -647,6 +737,9 @@ def main():
         trainer.push_to_hub(**kwargs)
     else:
         trainer.create_model_card(**kwargs)
+    
+    # Save adapters
+    model.save_adapter(training_args.output_dir, data_args.adapter_class)
 
     return results
 
