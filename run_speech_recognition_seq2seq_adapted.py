@@ -627,27 +627,6 @@ def main():
         wer = 100 * metric.compute()
         return wer
 
-    def eval_loop_():
-        # use the Trainer's prediction loop on your eval split
-        results = trainer.predict(vectorized_datasets["eval"])
-
-        pred_ids = results.predictions          # generated token ids
-        label_ids = results.label_ids           # label token ids
-
-        # replace ignore_index with pad_token_id for decoding
-        label_ids[label_ids == -100] = tokenizer.pad_token_id
-
-        # decode
-        pred_str = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
-        label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
-
-        # compute WER with your existing metric
-        wer = 100 * metric.compute(
-            predictions=pred_str,
-            references=label_str,
-        )
-        return wer
-
     # 9. Create a single speech processor
     # make sure all processes wait until data is saved
     with training_args.main_process_first():
@@ -713,8 +692,8 @@ def main():
         #    max_length=training_args.generation_max_length,
         #    num_beams=training_args.generation_num_beams,
         #)
-        post_training_wer = eval_loop()
-        print(f"The wer score after training is: {post_training_wer}")
+        metrics = eval_loop()
+        print(f"The wer score after training is: {metrics}")
         max_eval_samples = (
             data_args.max_eval_samples if data_args.max_eval_samples is not None else len(vectorized_datasets["eval"])
         )
